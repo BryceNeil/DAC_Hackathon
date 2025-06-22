@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 import argparse
 from dotenv import load_dotenv
+import time
 
 # Load environment variables from .env file
 load_dotenv()
@@ -28,6 +29,9 @@ if current_dir not in sys.path:
 # LangGraph imports
 from agents.tapeout_graph import TapeoutGraph
 from agents.state import TapeoutState
+
+# Progress indicator
+from utils.progress_indicator import ProgressIndicator, NodeProgress
 
 
 class ASUTapeoutAgent:
@@ -118,7 +122,7 @@ class ASUTapeoutAgent:
             # Create a unique thread ID for this problem
             thread_id = f"{Path(yaml_file).stem}_{os.getpid()}"
             config = {
-                "recursion_limit": 50,
+                "recursion_limit": 20,  # Reasonable recursion limit to prevent loops
                 "configurable": {"thread_id": thread_id}
             }
             
@@ -148,20 +152,85 @@ class ASUTapeoutAgent:
             Final state after execution
         """
         final_state = initial_state
+        progress = ProgressIndicator()
         
         if verbose:
             print(f"🔄 Starting LangGraph workflow (mode: {self.execution_mode})...")
+            print("=" * 60)
+            
+        # Track node timings
+        node_start_time = None
+        current_node = None
+        
+        # Node-specific progress messages
+        node_messages = {
+            "process_input": "Loading and parsing specification",
+            "planner": "Creating execution plan",
+            "spec_analyzer": "Analyzing specification details", 
+            "rtl_generator": "Generating RTL code",
+            "verification_agent": "Running verification",
+            "constraint_generator": "Generating timing constraints",
+            "physical_designer": "Running physical design flow",
+            "validator": "Validating final results",
+            "replan": "Planning next step",
+            "error_handler": "Handling errors"
+        }
+        
+        # Thinking nodes that require more time
+        thinking_nodes = {"planner", "rtl_generator", "spec_analyzer"}
             
         # Stream execution for visibility
         async for event in self.workflow.astream(initial_state, config):
             for node_name, node_output in event.items():
                 if node_name != "__end__":
+                    # Stop previous progress indicator
+                    if current_node:
+                        progress.stop()
+                        if node_start_time and verbose:
+                            elapsed = time.time() - node_start_time
+                            print(f"   ⏱️  Completed in {elapsed:.1f}s")
+                            print()
+                    
+                    # Show agent handoff
+                    if verbose and current_node:
+                        print(f"🔄 AGENT HANDOFF: {current_node} → {node_name}")
+                        print(f"📦 State keys: {list(node_output.keys()) if isinstance(node_output, dict) else 'N/A'}")
+                        
+                        # Show specific handoff details
+                        if isinstance(node_output, dict):
+                            if "errors" in node_output and node_output["errors"]:
+                                print(f"❌ Errors being passed: {len(node_output['errors'])}")
+                            if "rtl_code" in node_output:
+                                print(f"📝 RTL code: {'✅ Available' if node_output['rtl_code'] else '❌ Missing'}")
+                            if "recovery_mode" in node_output:
+                                print(f"🎭 Recovery mode: {node_output['recovery_mode']}")
+                        print("-" * 40)
+                    
+                    current_node = node_name
+                    node_start_time = time.time()
+                    
                     if verbose:
-                        print(f"\n📍 Node: {node_name}")
+                        print(f"📍 Node: {node_name}")
+                        
+                        # Start appropriate progress indicator
+                        message = node_messages.get(node_name, f"Processing {node_name}")
+                        
+                        if node_name in thinking_nodes:
+                            progress.start_thinking()
+                        elif node_name == "replan":
+                            progress.start_planning()
+                        elif node_name == "orchestrator":
+                            # Don't start progress for orchestrator as it prints its own output
+                            pass
+                        else:
+                            progress.start_spinner(message)
                         
                     # Update final state with node output
                     if isinstance(node_output, dict):
                         final_state.update(node_output)
+                        
+                        # Stop progress for output display
+                        progress.stop()
                         
                         # Print relevant updates
                         if verbose:
@@ -177,20 +246,48 @@ class ASUTapeoutAgent:
                                 plan = node_output["plan"]
                                 if hasattr(plan, "steps"):
                                     print(f"   📋 Plan: {len(plan.steps)} steps")
+                                    # Show plan details
+                                    for i, step in enumerate(plan.steps):
+                                        status_icon = "🔄" if step.status == "running" else "⏳"
+                                        print(f"      {i+1}. {status_icon} {step.step} ({step.agent})")
                             
                             if "rtl_code" in node_output and node_output["rtl_code"]:
                                 print(f"   💾 RTL generated ({len(node_output['rtl_code'])} chars)")
                             
                             if "verification_results" in node_output and node_output["verification_results"]:
                                 results = node_output["verification_results"]
-                                print(f"   🧪 Verification: {results.get('status', 'completed')}")
+                                status = results.get('status', 'completed')
+                                print(f"   🧪 Verification: {status}")
+                                if 'passed' in str(status).lower():
+                                    print(f"      ✅ All tests passed")
+                                elif 'failed' in str(status).lower():
+                                    print(f"      ❌ Some tests failed")
                             
                             if "physical_results" in node_output and node_output["physical_results"]:
                                 results = node_output["physical_results"]
-                                print(f"   🏗️  Physical design: {results.get('status', 'completed')}")
+                                status = results.get('status', 'completed')
+                                print(f"   🏗️  Physical design: {status}")
+                                if results.get('metrics'):
+                                    metrics = results['metrics']
+                                    print(f"      📊 Area: {metrics.get('area', 'N/A')}")
+                                    print(f"      ⚡ Power: {metrics.get('power', 'N/A')}")
+                                    print(f"      🕐 Timing: {metrics.get('timing_slack', 'N/A')}")
+        
+        # Stop final progress indicator
+        if current_node:
+            progress.stop()
+            if node_start_time and verbose:
+                elapsed = time.time() - node_start_time
+                print(f"   ⏱️  Completed in {elapsed:.1f}s")
         
         if verbose:
-            print("\n✅ Workflow completed")
+            print("\n" + "=" * 60)
+            print("✅ Workflow completed")
+            
+            # Show summary
+            if final_state.get("start_time") and final_state.get("end_time"):
+                total_time = (final_state["end_time"] - final_state["start_time"]).total_seconds()
+                print(f"⏱️  Total execution time: {total_time:.1f}s")
             
         return final_state
     

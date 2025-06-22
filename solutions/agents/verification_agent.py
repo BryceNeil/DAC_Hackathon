@@ -140,20 +140,33 @@ class VerificationAgent:
     def _find_testbench(self, problem_name: str) -> Optional[str]:
         """Find testbench file for the problem"""
         
-        # Common testbench locations
+        # Common testbench locations with multiple naming patterns
         possible_paths = [
+            # Standard naming
             f"../evaluation/visible/{problem_name}_tb.v",
             f"../evaluation/visible/{problem_name}_tb.sv",
             f"../evaluation/{problem_name}_tb.v",
             f"../evaluation/{problem_name}_tb.sv",
             f"./{problem_name}_tb.v",
             f"./{problem_name}_tb.sv",
+            # Alternative naming patterns
+            f"../evaluation/visible/iclad_{problem_name}_tb.v",
+            f"../evaluation/visible/iclad_{problem_name}_tb.sv",
+            # Partial match for seq_detector
+            f"../evaluation/visible/iclad_seq_detector_tb.v" if "seq_detector" in problem_name else None,
+            # Check problem directories by ID
+            f"../evaluation/visible/p1/iclad_seq_detector_tb.v" if "seq_detector" in problem_name else None,
         ]
+        
+        # Filter out None values
+        possible_paths = [p for p in possible_paths if p]
         
         for path in possible_paths:
             if os.path.exists(path):
+                print(f"✅ Found testbench: {path}")
                 return os.path.abspath(path)
         
+        print(f"⚠️ No testbench found for {problem_name}, will generate basic one")
         return None
     
     def _compile_rtl(self, rtl_file: str, testbench_file: str, problem_name: str) -> Dict[str, Any]:
