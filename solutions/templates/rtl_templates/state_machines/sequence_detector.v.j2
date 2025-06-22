@@ -1,0 +1,55 @@
+// Sequence Detector Template
+// Detects sequence: {{ sequence }}
+
+{{ module_signature }}
+    // State encoding
+    localparam IDLE = 0;
+    {% for i in range(sequence|length) %}
+    localparam S{{ i }} = {{ i + 1 }};
+    {% endfor %}
+    
+    // State register
+    reg [{{ (sequence|length).bit_length() }}:0] state, next_state;
+    
+    // State transition logic
+    always @(posedge clk or posedge reset) begin
+        if (reset)
+            state <= IDLE;
+        else
+            state <= next_state;
+    end
+    
+    // Next state logic
+    always @(*) begin
+        next_state = state;
+        detected = 1'b0;
+        
+        case (state)
+            IDLE: begin
+                if (data_in == 1'b{{ sequence[0] }})
+                    next_state = S0;
+                else
+                    next_state = IDLE;
+            end
+            
+            {% for i in range(sequence|length - 1) %}
+            S{{ i }}: begin
+                if (data_in == 1'b{{ sequence[i+1] }})
+                    {% if i == sequence|length - 2 %}
+                    begin
+                        next_state = IDLE;
+                        detected = 1'b1;
+                    end
+                    {% else %}
+                    next_state = S{{ i + 1 }};
+                    {% endif %}
+                else
+                    next_state = IDLE;
+            end
+            {% endfor %}
+            
+            default: next_state = IDLE;
+        endcase
+    end
+    
+endmodule 

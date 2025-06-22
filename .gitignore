@@ -1,0 +1,199 @@
+# ASU Spec2Tapeout ICLAD25 Hackathon .gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+
+# Environment Variables
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# API Keys and Secrets
+*.key
+secrets.json
+config.json
+credentials.json
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+
+# PyTorch
+*.pth
+*.pt
+
+# TensorFlow
+*.pb
+*.ckpt*
+checkpoint
+events.out.tfevents.*
+
+# EDA Tools and Generated Files
+*.vcd
+*.fst
+*.ghw
+*.log
+*.rpt
+*.timing
+*.area
+*.power
+*.def
+*.lef
+*.odb
+*.spef
+*.sdf
+*.lib
+*.db
+*.gds
+*.mag
+*.cdl
+*.cir
+*.sp
+*.spi
+*.dspf
+*.v.bak
+*.sv.bak
+
+# OpenROAD Generated Files
+or_*
+openroad_*
+results/
+reports/
+logs/
+*/results/
+*/reports/
+*/logs/
+
+# Simulation Files
+sim/
+simulation/
+testbench/
+waves/
+*.vcd
+*.fsdb
+*.shm/
+*.trn
+*.dsn
+
+# Synthesis Files
+syn/
+synthesis/
+netlists/
+mapped/
+*.mapped.v
+*.synth.v
+
+# Physical Design Files
+floorplan/
+placement/
+routing/
+layout/
+gds/
+*.def
+*.lef
+*.gds2
+*.gdsii
+
+# Temporary Files
+tmp/
+temp/
+*.tmp
+*.temp
+*.bak
+*.backup
+*.orig
+
+# LangChain/LangGraph Cache
+.langchain/
+.cache/
+*.cache
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# Documentation
+_build/
+.sphinx/
+
+# OS Generated Files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Large Files (avoid accidentally committing large datasets)
+*.zip
+*.tar.gz
+*.tar.bz2
+*.rar
+*.7z
+*.iso
+*.dmg
+
+# Compiled Binaries
+*.exe
+*.dll
+*.dylib
+*.a
+*.o
+
+# Local Development
+local/
+scratch/
+debug/
+test_output/
+
+# Problem-specific exclusions
+visible/*/
+hidden/*/
+evaluation/*/output/ 
