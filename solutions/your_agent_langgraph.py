@@ -311,7 +311,7 @@ class ASUTapeoutAgent:
         if not problem_name:
             problem_name = "unknown"
         
-        # Save RTL
+        # Save RTL - use .v extension to match basic agent
         if state.get("rtl_code"):
             with open(f"{output_dir}/{problem_name}.v", 'w') as f:
                 f.write(state["rtl_code"])

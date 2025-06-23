@@ -14,6 +14,8 @@ from pathlib import Path
 from langgraph.prebuilt import ToolNode, create_react_agent
 from langchain_openai import ChatOpenAI
 from langchain_anthropic import ChatAnthropic
+from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.messages import HumanMessage
 from tools.eda_langchain_tools import (
     yosys_synthesize,
     openroad_place_and_route,
@@ -22,6 +24,95 @@ from tools.eda_langchain_tools import (
 from tools.eda_tools import EDATools
 from tools.file_manager import FileManager
 from agents.state import TapeoutState
+from utils.synthesis_error_parser import SynthesisErrorParser
+
+
+class PhysicalDesignCallbackHandler(BaseCallbackHandler):
+    """Callback handler for streaming physical design output"""
+    
+    def __init__(self):
+        self.current_tool = None
+        
+    def on_llm_start(self, serialized, prompts, **kwargs):
+        print("\n🤖 Physical design agent analyzing task...", flush=True)
+        
+    def on_llm_new_token(self, token: str, **kwargs):
+        # Stream tokens to terminal
+        print(token, end="", flush=True)
+        
+    def on_llm_end(self, response, **kwargs):
+        print("\n", flush=True)  # New line after streaming
+        
+    def on_tool_start(self, serialized, input_str, **kwargs):
+        tool_name = serialized.get('name', 'unknown') if serialized else 'unknown'
+        self.current_tool = tool_name
+        
+        # Special handling for different tools
+        if tool_name == "yosys_synthesize":
+            print(f"\n🔧 YOSYS SYNTHESIS STARTING", flush=True)
+            print(f"   📋 Synthesizing RTL with Yosys...", flush=True)
+            print(f"   🎯 Target library: sky130", flush=True)
+        elif tool_name == "openroad_place_and_route":
+            print(f"\n🏗️ OPENROAD PLACE & ROUTE STARTING", flush=True)
+            print(f"   📐 Running floorplanning...", flush=True)
+        elif tool_name == "analyze_timing_report":
+            print(f"\n⏱️ TIMING ANALYSIS STARTING", flush=True)
+        else:
+            print(f"\n⚙️ Running tool: {tool_name}...", flush=True)
+            
+    def on_tool_end(self, output, **kwargs):
+        output_str = str(output)
+        
+        # Parse tool output and show results
+        try:
+            if isinstance(output, str) and output.startswith('{'):
+                result = json.loads(output)
+                
+                if self.current_tool == "yosys_synthesize":
+                    if result.get('success'):
+                        print(f"   ✅ Synthesis SUCCESSFUL!", flush=True)
+                        stats = result.get('stats', {})
+                        if stats:
+                            print(f"   📊 Synthesis Statistics:", flush=True)
+                            print(f"      • Cells: {stats.get('num_cells', 'N/A')}", flush=True)
+                            print(f"      • Wires: {stats.get('num_wires', 'N/A')}", flush=True)
+                            print(f"      • Chip area: {stats.get('chip_area', 'N/A')}", flush=True)
+                    else:
+                        print(f"   ❌ Synthesis FAILED!", flush=True)
+                        print(f"   💥 Error: {result.get('errors', 'Unknown error')}", flush=True)
+                        
+                elif self.current_tool == "openroad_place_and_route":
+                    if result.get('success'):
+                        print(f"   ✅ Place & Route SUCCESSFUL!", flush=True)
+                        odb_file = result.get('odb_file', 'N/A')
+                        print(f"   📦 ODB file: {odb_file}", flush=True)
+                    else:
+                        print(f"   ❌ Place & Route FAILED!", flush=True)
+                        print(f"   💥 Error: {result.get('errors', 'Unknown error')}", flush=True)
+                        
+                elif self.current_tool == "analyze_timing_report":
+                    if result.get('success'):
+                        print(f"   ✅ Timing Analysis Complete", flush=True)
+                        metrics = result.get('metrics', {})
+                        if metrics:
+                            print(f"   📊 Timing Metrics:", flush=True)
+                            for key, value in metrics.items():
+                                print(f"      • {key}: {value}", flush=True)
+            else:
+                # Fallback for non-JSON output
+                print(f"   ℹ️ Tool output: {output_str[:200]}{'...' if len(output_str) > 200 else ''}", flush=True)
+                
+        except Exception as e:
+            print(f"   ⚠️ Tool completed (output parsing error: {e})", flush=True)
+            
+    def on_tool_error(self, error, **kwargs):
+        print(f"   ❌ Tool error: {str(error)}", flush=True)
+        
+    def on_agent_action(self, action, **kwargs):
+        print(f"\n🎯 Agent action: {action.tool} with input: {str(action.tool_input)[:100]}...", flush=True)
+        
+    def on_agent_finish(self, finish, **kwargs):
+        print(f"\n✅ Physical design agent completed", flush=True)
 
 
 class PhysicalDesigner:
@@ -31,6 +122,7 @@ class PhysicalDesigner:
         self.name = "PhysicalDesigner"
         self.eda_tools = EDATools()
         self.file_manager = FileManager()
+        self.synthesis_error_parser = SynthesisErrorParser()
         
         # Define available LangChain tools
         self.tools = [yosys_synthesize, openroad_place_and_route, analyze_timing_report]
@@ -38,11 +130,22 @@ class PhysicalDesigner:
         # Create ToolNode for tool execution
         self.tool_node = ToolNode(self.tools)
         
-        # Select LLM based on model name
+        # Create streaming callback handler
+        self.streaming_handler = PhysicalDesignCallbackHandler()
+        
+        # Select LLM based on model name with streaming enabled
         if "claude" in llm_model.lower():
-            model = ChatAnthropic(model=llm_model)
+            model = ChatAnthropic(
+                model=llm_model,
+                streaming=True,
+                callbacks=[self.streaming_handler]
+            )
         else:
-            model = ChatOpenAI(model=llm_model)
+            model = ChatOpenAI(
+                model=llm_model,
+                streaming=True,
+                callbacks=[self.streaming_handler]
+            )
         
         # Create ReAct agent for physical design
         self.agent = create_react_agent(
@@ -543,13 +646,31 @@ class PhysicalDesigner:
         
         try:
             # Run agent with tools
-            result = await self.agent.ainvoke({"messages": [("user", task)]})
+            print(f"\n🏗️ STARTING PHYSICAL DESIGN FLOW", flush=True)
+            print(f"   📁 RTL file: {rtl_file}", flush=True)
+            print(f"   📁 SDC file: {sdc_file}", flush=True)
+            print(f"   🎯 Module: {module_name}", flush=True)
+            print(f"   🎯 Design: {problem_name}", flush=True)
+            print("=" * 60, flush=True)
+            
+            result = await self.agent.ainvoke(
+                {"messages": [HumanMessage(content=task)]},
+                config={
+                    "callbacks": [self.streaming_handler],
+                    "recursion_limit": 10
+                }
+            )
+            
+            print("\n" + "=" * 60, flush=True)
+            print("📊 PROCESSING RESULTS...", flush=True)
             
             # Extract results from agent's tool calls
             synthesis_success = False
             pnr_success = False
             odb_file_path = None
             metrics = {}
+            
+            print("\n📋 Checking tool results...", flush=True)
             
             for message in result.get("messages", []):
                 # Check tool results
@@ -558,24 +679,68 @@ class PhysicalDesigner:
                         import json
                         tool_result = json.loads(message.content)
                         
-                        if message.name == "yosys_synthesize" and tool_result.get("success"):
-                            synthesis_success = True
-                            metrics.update(tool_result.get("stats", {}))
+                        if message.name == "yosys_synthesize":
+                            print(f"   🔍 Found Yosys result: success={tool_result.get('success')}", flush=True)
+                            if tool_result.get("success"):
+                                synthesis_success = True
+                                metrics.update(tool_result.get("stats", {}))
+                                print(f"   ✅ Synthesis metrics: {tool_result.get('stats', {})}", flush=True)
+                            else:
+                                print(f"   ❌ Synthesis failed: {tool_result.get('errors', 'Unknown')}", flush=True)
                         
                         elif message.name == "openroad_place_and_route":
+                            print(f"   🔍 Found OpenROAD result: success={tool_result.get('success')}", flush=True)
                             if tool_result.get("success"):
                                 pnr_success = True
                                 odb_file_path = tool_result.get("odb_file")
                                 metrics.update(tool_result.get("metrics", {}))
+                                print(f"   ✅ P&R complete, ODB: {odb_file_path}", flush=True)
+                            else:
+                                print(f"   ❌ P&R failed: {tool_result.get('errors', 'Unknown')}", flush=True)
                         
                         elif message.name == "analyze_timing_report" and tool_result.get("success"):
                             metrics.update(tool_result.get("metrics", {}))
-                    except:
-                        pass
+                            print(f"   ✅ Timing analysis: {tool_result.get('metrics', {})}", flush=True)
+                    except Exception as e:
+                        print(f"   ⚠️ Error parsing tool result: {e}", flush=True)
+            
+            print(f"\n📊 SUMMARY:", flush=True)
+            print(f"   • Synthesis: {'✅ Success' if synthesis_success else '❌ Failed'}", flush=True)
+            print(f"   • Place & Route: {'✅ Success' if pnr_success else '❌ Failed'}", flush=True)
+            print(f"   • ODB File: {odb_file_path or 'Not generated'}", flush=True)
             
             # Fallback ODB path if not found
             if pnr_success and not odb_file_path:
                 odb_file_path = f"/tmp/orfs_{problem_name}/results/sky130hd/{problem_name}/6_final.odb"
+            
+            # Check for synthesis errors and add them to state for error handling
+            synthesis_errors = []
+            synthesis_log = ""
+            parsed_synthesis_errors = None
+            
+            if not synthesis_success:
+                for message in result.get("messages", []):
+                    if hasattr(message, "name") and message.name == "yosys_synthesize":
+                        try:
+                            import json
+                            tool_result = json.loads(message.content)
+                            if not tool_result.get("success"):
+                                synthesis_log = tool_result.get('synthesis_log', '')
+                                
+                                # Parse synthesis errors using our parser
+                                if synthesis_log:
+                                    parsed_synthesis_errors = self.synthesis_error_parser.parse_synthesis_log(synthesis_log)
+                                    
+                                    # Add parsed error information
+                                    synthesis_errors.append(f"Synthesis failed: {tool_result.get('errors', 'Unknown synthesis error')}")
+                                    synthesis_errors.append(f"Fix summary: {parsed_synthesis_errors.get('fix_summary', 'No fixes identified')}")
+                                else:
+                                    synthesis_errors.extend([
+                                        f"Synthesis failed: {tool_result.get('errors', 'Unknown synthesis error')}",
+                                        f"Synthesis log: No log available"
+                                    ])
+                        except:
+                            pass
             
             # Create minimal ODB if nothing worked
             if not odb_file_path or not os.path.exists(odb_file_path):
@@ -586,7 +751,7 @@ class PhysicalDesigner:
                     f.write(f"# Synthesis: {'Success' if synthesis_success else 'Failed'}\n")
                     f.write(f"# Place & Route: {'Success' if pnr_success else 'Failed'}\n")
             
-            return {
+            result_dict = {
                 "physical_results": {
                     "success": synthesis_success and pnr_success,
                     "synthesis_success": synthesis_success,
@@ -597,6 +762,18 @@ class PhysicalDesigner:
                 "odb_file_path": odb_file_path,
                 "past_steps": [("physical_design", f"Physical design {'completed' if pnr_success else 'attempted'} using LangChain tools")]
             }
+            
+            # Add synthesis errors to the result if synthesis failed
+            if not synthesis_success and synthesis_errors:
+                result_dict["errors"] = synthesis_errors
+                result_dict["physical_results"]["synthesis_log"] = synthesis_log
+                
+                # Add parsed synthesis errors for RTL fixing
+                if parsed_synthesis_errors:
+                    result_dict["synthesis_error_details"] = parsed_synthesis_errors
+                    result_dict["rtl_fix_instructions"] = self.synthesis_error_parser.get_rtl_fix_instructions(parsed_synthesis_errors)
+            
+            return result_dict
             
         except Exception as e:
             # Fallback to traditional flow

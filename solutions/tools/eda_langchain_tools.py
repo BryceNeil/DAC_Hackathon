@@ -119,17 +119,39 @@ def yosys_synthesize(rtl_file: str, top_module: str, target_library: str = "gene
         Dict with synthesis results and statistics
     """
     try:
+        print(f"\n🔧 YOSYS SYNTHESIS DETAILS:", flush=True)
+        print(f"   • RTL File: {rtl_file}", flush=True)
+        print(f"   • Top Module: {top_module}", flush=True)
+        print(f"   • Target Library: {target_library}", flush=True)
+        
         # Create Yosys script based on target library
         if target_library == "sky130":
+            # Find OpenROAD-flow-scripts path
+            possible_orfs_dirs = [
+                "/OpenROAD-flow-scripts",
+                "/workspace/OpenROAD-flow-scripts", 
+                "/usr/local/OpenROAD-flow-scripts"
+            ]
+            
+            orfs_dir = None
+            for dir_path in possible_orfs_dirs:
+                if os.path.exists(dir_path):
+                    orfs_dir = dir_path
+                    break
+            
+            if not orfs_dir:
+                orfs_dir = "/OpenROAD-flow-scripts"  # fallback
+                
+            lib_path = f"{orfs_dir}/flow/platforms/sky130hd/lib/sky130_fd_sc_hd__tt_025C_1v80.lib"
             script = f"""
             read_verilog {rtl_file}
             hierarchy -check -top {top_module}
             proc; opt; memory; opt
             techmap; opt
-            dfflibmap -liberty /OpenROAD-flow-scripts/flow/platforms/sky130hd/lib/sky130_fd_sc_hd__tt_025C_1v80.lib
-            abc -liberty /OpenROAD-flow-scripts/flow/platforms/sky130hd/lib/sky130_fd_sc_hd__tt_025C_1v80.lib
+            dfflibmap -liberty {lib_path}
+            abc -liberty {lib_path}
             clean
-            stat -liberty /OpenROAD-flow-scripts/flow/platforms/sky130hd/lib/sky130_fd_sc_hd__tt_025C_1v80.lib
+            stat -liberty {lib_path}
             write_verilog /tmp/synthesized_{top_module}.v
             """
         else:
@@ -146,20 +168,86 @@ def yosys_synthesize(rtl_file: str, top_module: str, target_library: str = "gene
         with open(script_file, 'w') as f:
             f.write(script)
             
+        print(f"   • Script file: {script_file}", flush=True)
+        print(f"\n📝 YOSYS SCRIPT:", flush=True)
+        print("-" * 40, flush=True)
+        print(script, flush=True)
+        print("-" * 40, flush=True)
+            
         cmd = ["yosys", "-s", script_file]
+        # Check if yosys is available
+        yosys_check = subprocess.run(["which", "yosys"], capture_output=True, text=True)
+        if yosys_check.returncode != 0:
+            return {
+                "success": False, 
+                "errors": "Yosys not found in PATH. Please run inside Docker container with EDA tools."
+            }
+        
+        print(f"\n🚀 RUNNING YOSYS COMMAND: {' '.join(cmd)}", flush=True)
+        print("=" * 60, flush=True)
+        
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        
+        # Print Yosys output
+        if result.stdout:
+            print("\n📄 YOSYS OUTPUT:", flush=True)
+            print("-" * 40, flush=True)
+            # Show first 50 lines and last 50 lines if output is long
+            lines = result.stdout.split('\n')
+            if len(lines) > 100:
+                print('\n'.join(lines[:50]), flush=True)
+                print("\n... [output truncated] ...\n", flush=True)
+                print('\n'.join(lines[-50:]), flush=True)
+            else:
+                print(result.stdout, flush=True)
+            print("-" * 40, flush=True)
+        
+        if result.stderr:
+            print("\n⚠️ YOSYS STDERR:", flush=True)
+            print(result.stderr, flush=True)
+        
+        print("=" * 60, flush=True)
         
         # Parse statistics from output
         stats = {}
+        num_cells = 0
+        num_wires = 0
+        chip_area = 0
+        
         for line in result.stdout.split('\n'):
             if 'Number of cells:' in line:
-                stats['cell_count'] = int(line.split()[-1])
+                try:
+                    num_cells = int(line.split()[-1])
+                    stats['num_cells'] = num_cells
+                except:
+                    pass
             elif 'Number of wires:' in line:
-                stats['wire_count'] = int(line.split()[-1])
+                try:
+                    num_wires = int(line.split()[-1])
+                    stats['num_wires'] = num_wires
+                except:
+                    pass
+            elif 'Chip area' in line:
+                try:
+                    # Extract area value
+                    parts = line.split()
+                    for i, part in enumerate(parts):
+                        if part == 'area' and i+1 < len(parts):
+                            chip_area = float(parts[i+1])
+                            stats['chip_area'] = chip_area
+                            break
+                except:
+                    pass
             elif '$_DFF_' in line or 'DFF' in line:
                 parts = line.split()
                 if len(parts) >= 2 and parts[1].isdigit():
                     stats['ff_count'] = stats.get('ff_count', 0) + int(parts[1])
+        
+        print(f"\n📊 EXTRACTED STATISTICS:", flush=True)
+        print(f"   • Cells: {num_cells}", flush=True)
+        print(f"   • Wires: {num_wires}", flush=True)
+        print(f"   • Chip Area: {chip_area}", flush=True)
+        print(f"   • Success: {result.returncode == 0}", flush=True)
         
         return {
             "success": result.returncode == 0,
@@ -167,7 +255,8 @@ def yosys_synthesize(rtl_file: str, top_module: str, target_library: str = "gene
             "errors": result.stderr,
             "stats": stats,
             "synthesized_file": f"/tmp/synthesized_{top_module}.v" if result.returncode == 0 else None,
-            "synthesizable": "successfully" in result.stdout.lower() or result.returncode == 0
+            "synthesizable": result.returncode == 0,
+            "synthesis_log": result.stdout + "\n" + result.stderr
         }
     except subprocess.TimeoutExpired:
         return {"success": False, "errors": "Synthesis timeout after 60 seconds"}
@@ -188,11 +277,22 @@ def openroad_place_and_route(rtl_file: str, sdc_file: str, design_name: str) -> 
     """
     try:
         # Check if OpenROAD-flow-scripts is available
-        orfs_dir = "/OpenROAD-flow-scripts"
-        if not os.path.exists(orfs_dir):
+        possible_orfs_dirs = [
+            "/OpenROAD-flow-scripts",
+            "/workspace/OpenROAD-flow-scripts", 
+            "/usr/local/OpenROAD-flow-scripts"
+        ]
+        
+        orfs_dir = None
+        for dir_path in possible_orfs_dirs:
+            if os.path.exists(dir_path):
+                orfs_dir = dir_path
+                break
+                
+        if not orfs_dir:
             return {
                 "success": False,
-                "errors": "OpenROAD-flow-scripts not found. Please set up ORFS environment."
+                "errors": f"OpenROAD-flow-scripts not found in any of: {possible_orfs_dirs}. Please run inside Docker container."
             }
         
         # Create working directory

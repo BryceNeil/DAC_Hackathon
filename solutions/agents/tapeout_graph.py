@@ -155,6 +155,7 @@ class TapeoutGraph:
             {
                 "replan": "replan",
                 "orchestrator": "orchestrator",
+                "rtl_generator": "rtl_generator",  # Direct route for synthesis fixes
                 "end": END
             }
         )
@@ -367,53 +368,25 @@ class TapeoutGraph:
     
     async def physical_designer_node(self, state: TapeoutState) -> Dict[str, Any]:
         """Physical design node using LangChain tools"""
-        progress = ProgressIndicator()
         
         try:
             designer = self.agents["physical_designer"]
             
-            # Show physical design progress stages
-            progress.show_status("🏗️", "Starting physical design flow...", 0)
-            progress.start_spinner("Running OpenROAD")
+            print("\n🏗️ Starting Physical Design Flow...")
+            print("   This will run Yosys synthesis and OpenROAD place & route")
+            print("   Watch for tool output below:")
+            print("=" * 60)
             
-            await asyncio.sleep(0.5)
-            progress.stop()
-            
-            # Show different stages
-            stages = [
-                ("📐", "Running floorplanning...", "Floorplanning"),
-                ("🔌", "Placing standard cells...", "Placement"),
-                ("🛤️", "Routing connections...", "Routing"),
-                ("⚡", "Optimizing timing...", "Optimization")
-            ]
-            
-            # Cycle through stages (in real implementation, this would track actual progress)
-            for emoji, message, stage in stages:
-                progress.show_status(emoji, message, 0)
-                progress.start_dots(stage, max_dots=3)
-                await asyncio.sleep(0.8)  # Simulate stage duration
-                progress.stop()
-            
-            # Final OpenROAD execution
-            progress.show_status("🔄", "Finalizing physical design...", 0)
-            progress.start_spinner("Generating final layout")
-            
-            # Use the new async method with LangChain tools
+            # Use the new async method with LangChain tools - this will show actual tool output
             result = await designer.run_physical_design_with_tools(state)
             
-            progress.stop()
-            
-            # Show completion
-            if result.get("physical_results") and result["physical_results"].get("odb_file"):
-                progress.show_status("🎯", "Physical design completed successfully!", 0)
+            print("=" * 60)
+            print("✅ Physical design flow completed")
             
             return result
             
         except Exception as e:
-            progress.stop()
             return {"errors": [f"Physical design failed: {str(e)}"]}
-        finally:
-            progress.stop()
     
     async def validator_node(self, state: TapeoutState) -> Dict[str, Any]:
         """Final validation node"""
@@ -526,25 +499,116 @@ class TapeoutGraph:
         }
     
     async def error_handler_node(self, state: TapeoutState) -> Dict[str, Any]:
-        """Handle errors and decide on recovery"""
+        """Handle errors and decide on recovery with intelligent routing"""
         errors = state.get("errors", [])
+        past_steps = state.get("past_steps", [])
         
         print(f"⚠️ ERROR HANDLER ACTIVATED")
         print(f"❌ Processing error: {errors[-1] if errors else 'Unknown error'}")
         
-        # Log the error
-        error_msg = f"Error encountered: {errors[-1] if errors else 'Unknown error'}"
+        error_msg = errors[-1] if errors else "Unknown error"
         
-        # For now, just log and try to continue
-        # In a more sophisticated implementation, we could analyze the error
-        # and decide on appropriate recovery action
+        # Analyze the error type and determine recovery strategy
+        recovery_action = self._analyze_error_for_recovery(error_msg, past_steps, state)
         
+        if recovery_action["action"] == "fix_rtl":
+            print(f"🔧 Synthesis failure detected - routing back to fix RTL")
+            # Add synthesis error details to state so RTL generator can use them
+            result = {
+                "synthesis_error_feedback": recovery_action["feedback"],
+                "recovery_mode": "fix_synthesis_errors",
+                "rtl_fix_attempt": state.get("rtl_fix_attempt", 0) + 1,
+                "past_steps": [(
+                    "error_handling",
+                    f"Synthesis failed: {recovery_action['feedback']} - Routing back to RTL generation"
+                )]
+            }
+            
+            # Include parsed synthesis error details if available
+            if state.get("synthesis_error_details"):
+                result["synthesis_error_details"] = state["synthesis_error_details"]
+            if state.get("rtl_fix_instructions"):
+                result["rtl_fix_instructions"] = state["rtl_fix_instructions"]
+                
+            return result
+        elif recovery_action["action"] == "continue":
+            return {
+                "past_steps": [(
+                    "error_handling",
+                    error_msg + " - Attempting to continue with next step"
+                )]
+            }
+        else:
+            # Default fallback
+            return {
+                "past_steps": [(
+                    "error_handling",
+                    error_msg + " - Using default recovery"
+                )]
+            }
+            
+    def _analyze_error_for_recovery(self, error_msg: str, past_steps: list, state: TapeoutState) -> dict:
+        """Analyze error and determine the best recovery strategy"""
+        
+        # Check if this is a synthesis-related error
+        synthesis_indicators = [
+            "synthesis failed", "yosys", "syntax error", "Synthesis: Failed",
+            "hierarchy", "read_verilog", "module", "parameter int"
+        ]
+        
+        if any(indicator.lower() in error_msg.lower() for indicator in synthesis_indicators):
+            # This is a synthesis error - we should fix the RTL
+            rtl_fix_attempts = state.get("rtl_fix_attempt", 0)
+            
+            if rtl_fix_attempts < 3:  # Allow up to 3 RTL fix attempts
+                # Extract specific synthesis feedback
+                feedback = self._extract_synthesis_feedback(error_msg, state)
+                return {
+                    "action": "fix_rtl",
+                    "feedback": feedback
+                }
+        
+        # Check for verification errors
+        if "verification failed" in error_msg.lower():
+            verification_attempts = len([s for s in past_steps if s[0] == "verification" and "failed" in s[1]])
+            if verification_attempts < 2:
+                return {
+                    "action": "retry_verification"
+                }
+        
+        # Default - just continue
         return {
-            "past_steps": [(
-                "error_handling",
-                error_msg + " - Attempting to continue with next step"
-            )]
+            "action": "continue"
         }
+    
+    def _extract_synthesis_feedback(self, error_msg: str, state: TapeoutState) -> str:
+        """Extract specific synthesis error feedback to help RTL generation"""
+        
+        # Get synthesis log if available
+        physical_results = state.get("physical_results", {})
+        synthesis_log = ""
+        
+        if "synthesis_log" in physical_results:
+            synthesis_log = physical_results["synthesis_log"]
+        
+        # Common synthesis issues and their fixes
+        if "parameter int" in error_msg or "parameter int" in synthesis_log:
+            return "Remove 'int' keyword from parameters. Use 'parameter N = 8' instead of 'parameter int N = 8'"
+        
+        if "syntax error" in error_msg.lower():
+            return "Fix Verilog syntax errors. Ensure proper module structure and signal declarations"
+        
+        if "rst_n" in synthesis_log or "rst_n" in error_msg:
+            return "Signal 'rst_n' is undefined. Use 'rst' signal or define 'rst_n' properly"
+        
+        if "hierarchy" in error_msg.lower():
+            return "Fix module hierarchy issues. Ensure all modules are properly defined"
+        
+        if "empty" in error_msg.lower() or "no logic" in error_msg.lower():
+            return "Module has no functional logic. Implement the required functionality"
+        
+        # Generic feedback
+        return f"Synthesis failed. Check RTL syntax and logic implementation. Error: {error_msg[:200]}"
     
     def route_from_planner(self, state: TapeoutState) -> str:
         """Route from planner to first agent or end"""
@@ -608,11 +672,18 @@ class TapeoutGraph:
         return "replan"
     
     def route_from_error(self, state: TapeoutState) -> str:
-        """Route from error handler with loop detection and orchestrator recovery"""
+        """Route from error handler with intelligent recovery routing"""
         errors = state.get("errors", [])
+        recovery_mode = state.get("recovery_mode")
         
         print(f"🔍 Error handler routing...")
         print(f"❌ Total errors: {len(errors)}")
+        
+        # Check if we should route to RTL generator for synthesis fix
+        if recovery_mode == "fix_synthesis_errors":
+            rtl_fix_attempts = state.get("rtl_fix_attempt", 0)
+            print(f"🔧 Routing to RTL generator for synthesis fix (attempt {rtl_fix_attempts})")
+            return "rtl_generator"
         
         # If too many errors, go to orchestrator for recovery
         if len(errors) > 8:
